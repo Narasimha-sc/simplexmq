@@ -93,6 +93,7 @@ defaultHTTP2ClientConfig =
           { socksProxy = Nothing,
             tcpConnectTimeout = defaultTcpConnectTimeout,
             tcpKeepAlive = Nothing,
+            tcpUnackedDataTimeout = Nothing,
             logTLSErrors = True,
             clientCredentials = Nothing,
             clientALPN = Nothing,

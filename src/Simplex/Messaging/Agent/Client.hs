@@ -315,6 +315,7 @@ import qualified Simplex.Messaging.TMap as TM
 import Simplex.Messaging.Transport (HandshakeError (..), SMPServiceRole (..), SMPVersion, ServiceCredentials (..), SessionId, THClientService' (..), THandleAuth (..), THandleParams (sessionId, thAuth, thVersion, serverInfo), TransportError (..), TransportPeer (..), shortLinksSMPVersion, newNtfCredsSMPVersion)
 import Simplex.Messaging.Transport.Client (TransportHost (..))
 import Simplex.Messaging.Transport.Credentials
+import Simplex.Messaging.Transport.KeepAlive (keepAliveDetectionTime)
 import Simplex.Messaging.Util
 import Simplex.Messaging.Version
 import System.Mem.Weak (Weak, deRefWeak)
@@ -980,7 +981,8 @@ getClientConfig :: AgentClient -> (AgentConfig -> ProtocolClientConfig v) -> AM'
 getClientConfig c cfgSel = do
   cfg <- asks $ cfgSel . config
   networkConfig <- getNetworkConfig c
-  pure cfg {networkConfig}
+  -- connections with unacknowledged data are detected as dead after the same time as idle connections
+  pure cfg {networkConfig, tcpUnackedDataTimeout = keepAliveDetectionTime <$> tcpKeepAlive networkConfig}
 
 getNetworkConfig :: MonadIO m => AgentClient -> m NetworkConfig
 getNetworkConfig c = do

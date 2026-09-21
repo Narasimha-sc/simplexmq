@@ -42,7 +42,7 @@ import Data.IORef
 import Data.IP
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as L
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.String
 import Data.Word (Word32, Word8)
 import qualified Data.X509 as X
@@ -127,6 +127,8 @@ data TransportClientConfig = TransportClientConfig
   { socksProxy :: Maybe SocksProxy,
     tcpConnectTimeout :: Int,
     tcpKeepAlive :: Maybe KeepAliveOpts,
+    -- seconds; bounds failing a connection with unacknowledged data, for which no keep-alive probes are sent
+    tcpUnackedDataTimeout :: Maybe Int,
     logTLSErrors :: Bool,
     clientCredentials :: Maybe T.Credential,
     clientALPN :: Maybe [ALPN],
@@ -144,6 +146,7 @@ defaultTransportClientConfig =
     { socksProxy = Nothing,
       tcpConnectTimeout = defaultTcpConnectTimeout,
       tcpKeepAlive = Just defaultKeepAliveOpts,
+      tcpUnackedDataTimeout = Nothing,
       logTLSErrors = True,
       clientCredentials = Nothing,
       clientALPN = Nothing,
@@ -164,7 +167,7 @@ data ConnectionHandle c
   | CHTransport (c 'TClient)
 
 runTLSTransportClient :: Transport c => T.Supported -> Maybe XS.CertificateStore -> TransportClientConfig -> Maybe SocksCredentials -> TransportHost -> ServiceName -> Maybe C.KeyHash -> (c 'TClient -> IO a) -> IO a
-runTLSTransportClient tlsParams caStore_ cfg@TransportClientConfig {socksProxy, tcpKeepAlive, clientCredentials, clientALPN, useSNI} socksCreds host port keyHash client = do
+runTLSTransportClient tlsParams caStore_ cfg@TransportClientConfig {socksProxy, tcpKeepAlive, tcpUnackedDataTimeout, clientCredentials, clientALPN, useSNI} socksCreds host port keyHash client = do
   serverCert <- newEmptyTMVarIO
   clientCredsSent <- newIORef False
   let hostName = B.unpack $ strEncode host
@@ -176,6 +179,8 @@ runTLSTransportClient tlsParams caStore_ cfg@TransportClientConfig {socksProxy, 
   let set hc = (>>= \c -> writeIORef h (Just $ hc c) $> c)
   E.bracket (set CHSocket $ connectTCP port) (\_ -> closeConn h) $ \sock -> do
     mapM_ (setSocketKeepAlive sock) tcpKeepAlive `catchAll` \e -> logError ("Error setting TCP keep-alive " <> tshow e)
+    -- with SOCKS proxy the socket is connected to the proxy, and a slow circuit should not fail the connection
+    when (isNothing socksProxy) $ mapM_ (setSocketUnackedDataTimeout sock) tcpUnackedDataTimeout `catchAll` \e -> logError ("Error setting TCP unacked data timeout " <> tshow e)
     let tCfg = clientTransportConfig cfg
     -- No TLS timeout to avoid failing connections via SOCKS
     tls <- set CHContext $ connectTLS (Just hostName) tCfg clientParams sock

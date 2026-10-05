@@ -6,8 +6,10 @@
 
 module Simplex.Messaging.Transport.KeepAlive
   ( KeepAliveOpts (..),
+    keepAliveDetectionTime,
     defaultKeepAliveOpts,
     setSocketKeepAlive,
+    setSocketUnackedDataTimeout,
   ) where
 
 import qualified Data.Aeson.TH as J
@@ -21,6 +23,10 @@ data KeepAliveOpts = KeepAliveOpts
     keepCnt :: Int
   }
   deriving (Eq, Show)
+
+-- seconds after which a connection with no response to the probes is reported as failed
+keepAliveDetectionTime :: KeepAliveOpts -> Int
+keepAliveDetectionTime KeepAliveOpts {keepIdle, keepIntvl, keepCnt} = keepIdle + keepIntvl * keepCnt
 
 defaultKeepAliveOpts :: KeepAliveOpts
 defaultKeepAliveOpts =
@@ -53,14 +59,28 @@ _TCP_KEEPCNT = 16
 
 #if defined(darwin_HOST_OS)
 foreign import capi "netinet/tcp.h value TCP_KEEPALIVE" _TCP_KEEPIDLE :: CInt
+
+foreign import capi "netinet/tcp.h value TCP_RXT_CONNDROPTIME" _TCP_RXT_CONNDROPTIME :: CInt
 #else
 foreign import capi "netinet/tcp.h value TCP_KEEPIDLE" _TCP_KEEPIDLE :: CInt
+
+foreign import capi "netinet/tcp.h value TCP_USER_TIMEOUT" _TCP_USER_TIMEOUT :: CInt
 #endif
 
 foreign import capi "netinet/tcp.h value TCP_KEEPINTVL" _TCP_KEEPINTVL :: CInt
 
 foreign import capi "netinet/tcp.h value TCP_KEEPCNT" _TCP_KEEPCNT :: CInt
 
+#endif
+
+-- | seconds
+setSocketUnackedDataTimeout :: Socket -> Int -> IO ()
+#if defined(mingw32_HOST_OS)
+setSocketUnackedDataTimeout _ _ = pure ()
+#elif defined(darwin_HOST_OS)
+setSocketUnackedDataTimeout sock = setSocketOption sock (SockOpt _SOL_TCP _TCP_RXT_CONNDROPTIME)
+#else
+setSocketUnackedDataTimeout sock t = setSocketOption sock (SockOpt _SOL_TCP _TCP_USER_TIMEOUT) (t * 1000) -- TCP_USER_TIMEOUT is in milliseconds
 #endif
 
 setSocketKeepAlive :: Socket -> KeepAliveOpts -> IO ()

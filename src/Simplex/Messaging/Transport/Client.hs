@@ -42,7 +42,7 @@ import Data.IORef
 import Data.IP
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as L
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.String
 import Data.Word (Word32, Word8)
 import qualified Data.X509 as X
@@ -176,6 +176,11 @@ runTLSTransportClient tlsParams caStore_ cfg@TransportClientConfig {socksProxy, 
   let set hc = (>>= \c -> writeIORef h (Just $ hc c) $> c)
   E.bracket (set CHSocket $ connectTCP port) (\_ -> closeConn h) $ \sock -> do
     mapM_ (setSocketKeepAlive sock) tcpKeepAlive `catchAll` \e -> logError ("Error setting TCP keep-alive " <> tshow e)
+    -- a connection with unacknowledged data gets no keep-alive probes, so it is failed after the same
+    -- time as an idle one; with SOCKS proxy the socket is connected to the proxy, and a slow circuit
+    -- should not fail the connection
+    when (isNothing socksProxy) $
+      mapM_ (setSocketUnackedDataTimeout sock . keepAliveDetectionTime) tcpKeepAlive `catchAll` \e -> logError ("Error setting TCP unacked data timeout " <> tshow e)
     let tCfg = clientTransportConfig cfg
     -- No TLS timeout to avoid failing connections via SOCKS
     tls <- set CHContext $ connectTLS (Just hostName) tCfg clientParams sock

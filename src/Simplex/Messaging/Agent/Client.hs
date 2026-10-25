@@ -364,6 +364,8 @@ data AgentClient = AgentClient
     presetServers :: [SMPServer],
     userNetworkInfo :: TVar UserNetworkInfo,
     userNetworkUpdated :: TVar (Maybe UTCTime),
+    -- incremented when the clients are closed after the network changed, see withRetryEpoch
+    networkEpoch :: TVar Int,
     -- incremented for each accepted network info, to identify the most recent one
     networkEventSeq :: TVar Int,
     subscrConns :: TVar (Set ConnId),
@@ -537,6 +539,7 @@ newAgentClient clientId InitialAgentServers {smp, ntf, xftp, entitlements, netCf
   useNetworkConfig <- newTVarIO (slowNetworkConfig netCfg, netCfg)
   userNetworkInfo <- newTVarIO $ UserNetworkInfo UNOther True
   userNetworkUpdated <- newTVarIO Nothing
+  networkEpoch <- newTVarIO 0
   networkEventSeq <- newTVarIO 0
   subscrConns <- newTVarIO S.empty
   currentSubs <- SS.emptyIO
@@ -582,6 +585,7 @@ newAgentClient clientId InitialAgentServers {smp, ntf, xftp, entitlements, netCf
         presetServers,
         userNetworkInfo,
         userNetworkUpdated,
+        networkEpoch,
         networkEventSeq,
         subscrConns,
         currentSubs,
@@ -844,7 +848,7 @@ resubscribeSMPSession c@AgentClient {smpSubWorkers, workerSeq} tSess = do
       atomically $ putTMVar (sessionVar v) a
     runSubWorker v = do
       ri <- asks $ reconnectInterval . config
-      withRetryForeground ri isForeground (isNetworkOnline c) $ \_ loop -> do
+      withRetryForeground ri isForeground (isNetworkOnline c) (readTVar $ networkEpoch c) $ \_ loop -> do
         pending_ <- atomically $ do
           pending@(pendingSubs, pendingSS) <- SS.getPendingSubs tSess $ currentSubs c
           if M.null pendingSubs && isNothing pendingSS

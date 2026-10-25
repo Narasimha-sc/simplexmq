@@ -35,6 +35,8 @@ module Simplex.Messaging.Client
     ProxiedRelay (..),
     getProtocolClient,
     closeProtocolClient,
+    failPendingRequests,
+    clientConnected,
     protocolClientServer,
     protocolClientServer',
     transportHost',
@@ -655,10 +657,10 @@ getProtocolClient g nm transportSession@(_, srv, _) cfg@ProtocolClientConfig {qS
             writeTVar (connected c) True
             putTMVar cVar $ Right c'
           raceAny_ ([send c' th, process c', receive c' th] <> [monitor c' | smpPingInterval > 0])
-            `E.finally` (failPendingRequests c >> disconnected c')
+            `E.finally` (atomically (writeTVar (connected c) False) >> failSentCommands c >> disconnected c')
 
-    failPendingRequests :: PClient v err msg -> IO ()
-    failPendingRequests PClient {sentCommands} = atomically $ swapTVar sentCommands mempty >>= mapM_ failRequest
+    failSentCommands :: PClient v err msg -> IO ()
+    failSentCommands PClient {sentCommands} = atomically $ swapTVar sentCommands mempty >>= mapM_ failRequest
       where
         failRequest Request {pending, responseVar} =
           whenM (swapTVar pending False) $ void $ tryPutTMVar responseVar $ Left $ PCENetworkError NEFailedError
@@ -765,6 +767,13 @@ unexpectedResponse = PCEUnexpectedResponse . B.pack . take 32 . show
 closeProtocolClient :: ProtocolClient v err msg -> IO ()
 closeProtocolClient = mapM_ (deRefWeak >=> mapM_ killThread) . action
 {-# INLINE closeProtocolClient #-}
+
+clientConnected :: ProtocolClient v err msg -> STM Bool
+clientConnected ProtocolClient {client_ = PClient {connected}} = readTVar connected
+
+failPendingRequests :: ProtocolClient v err msg -> IO ()
+failPendingRequests ProtocolClient {client_ = PClient {sentCommands}} =
+  readTVarIO sentCommands >>= mapM_ (\Request {pending, responseVar} -> atomically $ whenM (swapTVar pending False) $ void $ tryPutTMVar responseVar $ Left $ PCENetworkError NEFailedError)
 
 -- | SMP client error type.
 data ProtocolClientError err

@@ -24,6 +24,7 @@
 
 module Simplex.Messaging.Agent.Client
   ( AgentClient (..),
+    ProxyChoice (..),
     ProtocolTestFailure (..),
     ProtocolTestStep (..),
     ClntQueueReqData (..),
@@ -170,6 +171,8 @@ module Simplex.Messaging.Agent.Client
     userServers,
     pickServer,
     getNextServer,
+    recordProxyFailure,
+    clearProxyFailure,
     withNextSrv,
     incSMPServerStat,
     incSMPServerStat',
@@ -224,7 +227,7 @@ import Data.Set (Set)
 import qualified Data.Set as S
 import Data.Text (Text)
 import Data.Text.Encoding
-import Data.Time (UTCTime, addUTCTime, getCurrentTime)
+import Data.Time (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Clock.System (getSystemTime)
 import Data.Word (Word16, Word32)
 import qualified Data.X509.Validation as XV
@@ -339,6 +342,9 @@ type NtfTransportSession = TransportSession NtfResponse
 
 type XFTPTransportSession = TransportSession FileResponse
 
+data ProxyChoice = ProxyChoice {chosenProxy :: SMPServerWithAuth, failingSince :: Maybe UTCTime}
+  deriving (Eq, Show)
+
 data AgentClient = AgentClient
   { acThread :: TVar (Maybe (Weak ThreadId)),
     active :: TVar Bool,
@@ -349,8 +355,8 @@ data AgentClient = AgentClient
     useClientServices :: TMap UserId Bool,
     -- smpProxiedRelays:
     -- SMPTransportSession defines connection from proxy to relay,
-    -- SMPServerWithAuth defines client connected to SMP proxy (with the same userId and entityId in TransportSession)
-    smpProxiedRelays :: TMap SMPTransportSession SMPServerWithAuth,
+    -- ProxyChoice defines client connected to SMP proxy (with the same userId and entityId in TransportSession)
+    smpProxiedRelays :: TMap SMPTransportSession ProxyChoice,
     ntfServers :: TVar [NtfServer],
     ntfClients :: TMap NtfTransportSession NtfClientVar,
     xftpServers :: TMap UserId (UserServers 'PXFTP),
@@ -695,16 +701,13 @@ getSMPProxyClient c@AgentClient {active, smpClients, smpProxiedRelays, workerSeq
   (tSess@(_, srv, _), auth) <- liftIO $ proxiedTransportSession proxySrv
   withGetSessVar workerSeq tSess smpClients ts (newProxyClient tSess auth ts) (waitForProxyClient tSess auth)
     `catchAllErrors` \e -> do
-      unless (isWaitTimeout e) $ atomically $
-        TM.lookup destSess smpProxiedRelays >>= \case
-          Just (ProtoServerWithAuth chosenSrv _) | chosenSrv == srv -> TM.delete destSess smpProxiedRelays
-          _ -> pure ()
+      unless (isWaitTimeout e) $ atomically $ whenM (isChosenProxy c destSess srv) $ TM.delete destSess smpProxiedRelays
       throwE e
   where
     isWaitTimeout = \case BROKER _ TIMEOUT -> True; _ -> False
     proxiedTransportSession :: SMPServerWithAuth -> IO (SMPTransportSession, Maybe SMP.BasicAuth)
     proxiedTransportSession proxySrv = do
-      ProtoServerWithAuth srv auth <- either id id <$> TM.lookupOrInsertIO destSess (pure proxySrv) smpProxiedRelays
+      ProtoServerWithAuth srv auth <- chosenProxy . either id id <$> TM.lookupOrInsertIO destSess (pure $ ProxyChoice proxySrv Nothing) smpProxiedRelays
       pure ((userId, srv, qId), auth)
     newProxyClient :: SMPTransportSession -> Maybe SMP.BasicAuth -> UTCTime -> SMPClientVar -> AM (SMPConnectedClient, Either AgentErrorType ProxiedRelay)
     newProxyClient tSess auth ts v = do
@@ -729,7 +732,7 @@ getSMPProxyClient c@AgentClient {active, smpClients, smpProxiedRelays, workerSeq
           atomically $ do
             unless (serverHostError e) $ do
               removeSessVar rv destSrv prs
-              TM.delete destSess smpProxiedRelays
+              whenM (isChosenProxy c destSess $ protocolClientServer' smp) $ TM.delete destSess smpProxiedRelays
             putTMVar (sessionVar rv) (Left e)
             pure $ Left e
       where
@@ -800,7 +803,7 @@ smpClientDisconnected c@AgentClient {active, smpClients, smpProxiedRelays} tSess
               cs = nubOrd $ map qConnId qs
           -- this removes proxied relays that this client created sessions to
           destSrvs <- M.keys <$> readTVar prs
-          forM_ destSrvs $ \destSrv -> TM.delete (userId, destSrv, cId) smpProxiedRelays
+          forM_ destSrvs $ \destSrv -> whenM (isChosenProxy c (userId, destSrv, cId) srv) $ TM.delete (userId, destSrv, cId) smpProxiedRelays
           pure (qs, cs, serviceSub_)
 
     serverDown :: ([RcvQueueSub], [ConnId], Maybe ServiceSub) -> IO ()
@@ -1209,10 +1212,15 @@ sendOrProxySMPCommand c nm userId destSrv@ProtocolServer {host = destHosts} conn
     sendViaProxy :: Maybe SMPServerWithAuth -> SMPTransportSession -> AM (Maybe SMPServer, a)
     sendViaProxy proxySrv_ destSess@(_, _, connId_) = do
       r <- tryAllErrors . withProxySession c nm proxySrv_ destSess entId ("PFWD " <> cmdStr) $ \(SMPConnectedClient smp _, proxySess@ProxiedRelay {prBasicAuth}) -> do
-        r' <- liftClient SMP (clientServer smp) $ sendCmdViaProxy smp proxySess
         let proxySrv = protocolClientServer' smp
+        r' <-
+          liftClient SMP (clientServer smp) (sendCmdViaProxy smp proxySess) `catchE` \e -> do
+            case e of
+              SMP _ _ -> atomically $ clearProxyFailure c destSess proxySrv
+              _ -> pure ()
+            throwE e
         case r' of
-          Right r -> pure (Just proxySrv, r)
+          Right r -> atomically (clearProxyFailure c destSess proxySrv) $> (Just proxySrv, r)
           Left proxyErr -> do
             case proxyErr of
               ProxyProtocolError (SMP.PROXY SMP.NO_SESSION) -> do
@@ -1222,6 +1230,11 @@ sendOrProxySMPCommand c nm userId destSrv@ProtocolServer {host = destHosts} conn
                   -- sendViaProxy is called recursively here to re-create the session via the same server
                   -- to avoid failure in interactive calls that don't retry after the session disconnection.
                   Nothing -> sendViaProxy (Just $ ProtoServerWithAuth proxySrv prBasicAuth) destSess
+              ProxyProtocolError (SMP.PROXY (SMP.BROKER e))
+                | not (brokerHostError e) -> do
+                    ts <- liftIO getCurrentTime
+                    atomically $ recordProxyFailure c destSess proxySrv ts
+                    proxyError
               _ -> proxyError
             where
               proxyError =
@@ -1234,7 +1247,7 @@ sendOrProxySMPCommand c nm userId destSrv@ProtocolServer {host = destHosts} conn
               -- checks that the current proxied relay session is the same one that was used to send the message and removes it
               deleteRelaySession =
                 ( TM.lookup destSess (smpProxiedRelays c)
-                    $>>= \(ProtoServerWithAuth srv _) -> tryReadSessVar (userId, srv, connId_) (smpClients c)
+                    $>>= \ProxyChoice {chosenProxy = ProtoServerWithAuth srv _} -> tryReadSessVar (userId, srv, connId_) (smpClients c)
                 )
                   >>= \case
                     Just (Right (SMPConnectedClient smp' prs))
@@ -1626,11 +1639,33 @@ serverHostError = \case
   SMP _ (SMP.PROXY (SMP.BROKER e)) -> brokerHostError e
   PROXY _ _ (ProxyProtocolError (SMP.PROXY (SMP.BROKER e))) -> brokerHostError e
   _ -> False
-  where
-    brokerHostError = \case
-      HOST -> True
-      SMP.TRANSPORT TEVersion -> True
-      _ -> False
+
+brokerHostError :: BrokerErrorType -> Bool
+brokerHostError = \case
+  HOST -> True
+  SMP.TRANSPORT TEVersion -> True
+  _ -> False
+
+lookupProxyChoice :: AgentClient -> SMPTransportSession -> SMPServer -> STM (Maybe ProxyChoice)
+lookupProxyChoice AgentClient {smpProxiedRelays} destSess proxySrv =
+  mfilter ((proxySrv ==) . protoServer . chosenProxy) <$> TM.lookup destSess smpProxiedRelays
+
+isChosenProxy :: AgentClient -> SMPTransportSession -> SMPServer -> STM Bool
+isChosenProxy c destSess proxySrv = isJust <$> lookupProxyChoice c destSess proxySrv
+
+recordProxyFailure :: AgentClient -> SMPTransportSession -> SMPServer -> UTCTime -> STM ()
+recordProxyFailure c@AgentClient {agentEnv, smpProxiedRelays} destSess proxySrv ts =
+  lookupProxyChoice c destSess proxySrv >>= \case
+    Just choice@ProxyChoice {failingSince = Nothing} -> TM.insert destSess choice {failingSince = Just ts} smpProxiedRelays
+    Just ProxyChoice {failingSince = Just since}
+      | diffUTCTime ts since >= proxyFailureInterval (config agentEnv) -> TM.delete destSess smpProxiedRelays
+    _ -> pure ()
+
+clearProxyFailure :: AgentClient -> SMPTransportSession -> SMPServer -> STM ()
+clearProxyFailure c@AgentClient {smpProxiedRelays} destSess proxySrv =
+  lookupProxyChoice c destSess proxySrv >>= \case
+    Just choice@ProxyChoice {failingSince = Just _} -> TM.insert destSess choice {failingSince = Nothing} smpProxiedRelays
+    _ -> pure ()
 
 -- | Batch by transport session and subscribe queues. The list of results can have a different order.
 subscribeQueues :: AgentClient -> Bool -> [RcvQueueSub] -> AM' [(RcvQueueSub, Either AgentErrorType (Maybe ServiceId))]

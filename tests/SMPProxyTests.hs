@@ -24,12 +24,13 @@ import Data.ByteString.Char8 (ByteString)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as L
 import qualified Data.Map.Strict as M
-import Data.Time.Clock (getCurrentTime)
+import Data.Time.Clock (addUTCTime, getCurrentTime)
 import SMPAgentClient
 import SMPClient
 import ServerTests (decryptMsgV3, responseTime, sendRecv)
 import Simplex.Messaging.Agent hiding (createConnection, joinConnection, sendMessage)
 import qualified Simplex.Messaging.Agent as A
+import Simplex.Messaging.Agent.Client (ProxyChoice (..), clearProxyFailure, recordProxyFailure)
 import Simplex.Messaging.Agent.Env.SQLite (AgentConfig (..), Env (..), InitialAgentServers (..), ServerRoles (..), presetServerCfg)
 import Simplex.Messaging.Agent.Protocol hiding (CON, CONF, INFO, REQ)
 import qualified Simplex.Messaging.Agent.Protocol as A
@@ -155,7 +156,11 @@ smpProxyTests = do
         it "retries sending when destination relay session disconnects in proxy" $ \_ ->
           agentViaProxyRetryNoSession
         it "chooses another proxy when the chosen proxy is offline" $ \_ ->
-          agentViaProxyRepick
+          agentViaProxyRepick id
+        it "chooses another proxy when the chosen proxy cannot forward to destination relay" $ \_ ->
+          agentViaProxyRepick $ withSmpServerConfigOn (transport @TLS) proxyCfgForwardTimeout testPort3 . const
+        it "keeps the chosen proxy until it fails for proxyFailureInterval" $ \_ ->
+          agentProxyFailureStreak
       describe "stress test 1k" $ do
         let deliver nAgents nMsgs = agentDeliverMessagesViaProxyConc (replicate nAgents [srv1]) (map bshow [1 :: Int .. nMsgs])
         it "2 agents, 250 messages" $ oneServer $ deliver 2 250
@@ -448,15 +453,15 @@ agentViaProxyRetryNoSession = do
     withServer2 = withSmpServerConfigOn (transport @TLS) proxyCfgS2 testPort2
     servers srv = initAgentServersProxy {smp = userServers [srv]}
 
-agentViaProxyRepick :: HasTestEnv => IO ()
-agentViaProxyRepick =
+agentViaProxyRepick :: HasTestEnv => (IO () -> IO ()) -> IO ()
+agentViaProxyRepick withBadProxy =
   withSmpServerConfigOn (transport @TLS) proxyCfg testPort $ \_ ->
     withSmpServerConfigOn (transport @TLS) proxyCfgS2 testPort2 $ \_ ->
-      withAgent 1 aCfg aliceServers testDB $ \alice ->
+      withBadProxy . withAgent 1 aCfg aliceServers testDB $ \alice ->
         withAgent 2 agentCfg initAgentServers testDB2 $ \bob -> do
           atomically $ do
             writeTVar (randomServer $ agentEnv alice) (mkStdGen 0)
-            TM.insert destSess (noAuthSrv badProxy) (smpProxiedRelays alice)
+            TM.insert destSess ProxyChoice {chosenProxy = noAuthSrv badProxy, failingSince = Nothing} (smpProxiedRelays alice)
           (bobId, CCLink qInfo Nothing) <- runRight $ A.createConnection alice NRMInteractive 1 True True SCMInvitation Nothing Nothing CR.IKPQOn False SMSubscribe
           (aliceId, _) <- runRight $ A.prepareConnectionToJoin bob 1 True qInfo PQSupportOn
           _ <- runRight $ A.joinConnection bob NRMInteractive 1 aliceId True qInfo "bob's connInfo" PQSupportOn SMSubscribe
@@ -471,6 +476,19 @@ agentViaProxyRepick =
             2 <- fst <$> A.sendMessage alice bobId CR.PQEncOn noMsgFlags "hello"
             get alice ##> ("", bobId, A.SENT 2 (Just testSMPServer2))
             get bob =##> \case ("", c, Msg' _ _ "hello") -> c == aliceId; _ -> False
+          ts <- getCurrentTime
+          atomically $ TM.insert destSess ProxyChoice {chosenProxy = noAuthSrv testSMPServer2, failingSince = Just ts} (smpProxiedRelays alice)
+          runRight_ $ do
+            3 <- fst <$> A.sendMessage alice bobId CR.PQEncOn noMsgFlags "hello 2"
+            get alice ##> ("", bobId, A.SENT 3 (Just testSMPServer2))
+          TM.lookupIO destSess (smpProxiedRelays alice) `shouldReturn` Just ProxyChoice {chosenProxy = noAuthSrv testSMPServer2, failingSince = Nothing}
+          atomically $ TM.insert destSess ProxyChoice {chosenProxy = noAuthSrv testSMPServer2, failingSince = Just ts} (smpProxiedRelays alice)
+          runRight_ $ deleteConnection bob NRMInteractive aliceId
+          _ <- runRight $ A.sendMessage alice bobId CR.PQEncOn noMsgFlags "hello 3"
+          timeout 10000000 (get alice) >>= \case
+            Just ("", c, A.MERR {}) | c == bobId -> pure ()
+            r -> expectationFailure $ "relay error was not reported: " <> show r
+          TM.lookupIO destSess (smpProxiedRelays alice) `shouldReturn` Just ProxyChoice {chosenProxy = noAuthSrv testSMPServer2, failingSince = Nothing}
   where
     badProxy = SMPServer testHost2 testPort3 testKeyHash
     destSess = (1, testSMPServer, Nothing)
@@ -478,7 +496,31 @@ agentViaProxyRepick =
     srvCfg roles = presetServerCfg True roles (Just 1) . noAuthSrv
     relayRoles = ServerRoles {storage = True, proxy = False, names = False}
     proxyRoles = ServerRoles {storage = False, proxy = True, names = False}
-    aCfg = agentCfg {messageRetryInterval = fastMessageRetryInterval}
+    aCfg = agentCfg {messageRetryInterval = fastMessageRetryInterval, proxyFailureInterval = 0}
+
+agentProxyFailureStreak :: HasTestEnv => IO ()
+agentProxyFailureStreak =
+  withAgent 1 agentCfg initAgentServersProxy testDB $ \c -> do
+    ts <- getCurrentTime
+    let destSess = (1, testSMPServer, Nothing)
+        proxy2 = noAuthSrv testSMPServer2
+        interval = proxyFailureInterval agentCfg
+        chosen since = Just ProxyChoice {chosenProxy = proxy2, failingSince = since}
+        choice = TM.lookupIO destSess (smpProxiedRelays c)
+        failed srv = atomically . recordProxyFailure c destSess srv
+    atomically $ TM.insert destSess ProxyChoice {chosenProxy = proxy2, failingSince = Nothing} (smpProxiedRelays c)
+    failed testSMPServer2 ts
+    choice `shouldReturn` chosen (Just ts)
+    failed testSMPServer2 $ addUTCTime (interval / 2) ts
+    choice `shouldReturn` chosen (Just ts)
+    atomically $ clearProxyFailure c destSess testSMPServer
+    failed testSMPServer $ addUTCTime interval ts
+    choice `shouldReturn` chosen (Just ts)
+    atomically $ clearProxyFailure c destSess testSMPServer2
+    choice `shouldReturn` chosen Nothing
+    failed testSMPServer2 ts
+    failed testSMPServer2 $ addUTCTime interval ts
+    choice `shouldReturn` Nothing
 
 testNoProxy :: HasTestEnv => AStoreType -> IO ()
 testNoProxy msType = do

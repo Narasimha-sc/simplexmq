@@ -80,6 +80,9 @@ testPort = testServerPort 1
 testPort2 :: HasTestEnv => ServiceName
 testPort2 = testServerPort 2
 
+testPort3 :: HasTestEnv => ServiceName
+testPort3 = testServerPort 8
+
 ntfTestPort :: HasTestEnv => ServiceName
 ntfTestPort = testServerPort 3
 

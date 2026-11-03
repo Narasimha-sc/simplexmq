@@ -556,7 +556,6 @@ test-suite simplexmq-test
       CoreTests.SOCKSSettings
       CoreTests.StoreLogTests
       CoreTests.TSessionSubs
-      CoreTests.TransportServerTests
       CoreTests.UtilTests
       CoreTests.VersionRangeTests
       FileDescriptionTests
@@ -601,6 +600,8 @@ test-suite simplexmq-test
       apps/xftp-server
       apps/common
   if !os(windows)
+    other-modules:
+        CoreTests.TransportServerTests
     c-sources:
         tests/CoreTests/no_ipv6.c
   default-extensions:

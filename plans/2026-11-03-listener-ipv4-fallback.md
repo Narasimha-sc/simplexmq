@@ -12,7 +12,7 @@ On a host with IPv6 disabled in the kernel (`ipv6.disable=1`):
 
 ## Fix
 
-`startTCPServer` opens the IPv6 socket first. When that fails with `EAFNOSUPPORT` and an IPv4 address was resolved, it opens the IPv4 socket instead. Other errors are rethrown.
+`startTCPServer` opens the IPv6 socket first. When that fails with `EAFNOSUPPORT` and an IPv4 address was resolved, it opens the IPv4 socket instead. Other errors are rethrown. On Windows `network` reports socket errors without an errno, so the fallback does not apply there.
 
 ## Scope
 

@@ -41,6 +41,10 @@ import XFTPServerTests (xftpServerTests)
 import WebTests (webTests)
 import XFTPWebTests (xftpWebTests)
 
+#if !defined(mingw32_HOST_OS)
+import CoreTests.TransportServerTests
+#endif
+
 #if defined(dbPostgres)
 import Fixtures
 import Simplex.Messaging.Agent.Store.Postgres.Migrations.App
@@ -95,6 +99,9 @@ main = do
             describe "XFTP store log tests" fileStoreLogTests
             fileExpirationTests
             describe "TSessionSubs tests" tSessionSubsTests
+#if !defined(mingw32_HOST_OS)
+            describe "Transport server tests" transportServerTests
+#endif
             describe "Util tests" utilTests
             describe "Names resolver tests" smpNamesTests
             describe "RSLV functional API tests" rslvTests

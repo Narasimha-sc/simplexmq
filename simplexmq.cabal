@@ -599,6 +599,11 @@ test-suite simplexmq-test
       apps/smp-server
       apps/xftp-server
       apps/common
+  if !os(windows)
+    other-modules:
+        CoreTests.TransportServerTests
+    c-sources:
+        tests/CoreTests/no_ipv6.c
   default-extensions:
       StrictData
   -- add -fhpc to ghc-options to run tests with coverage

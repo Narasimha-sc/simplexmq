@@ -443,7 +443,7 @@ defaultNetworkConfig =
 
 transportClientConfig :: NetworkConfig -> NetworkRequestMode -> TransportHost -> Bool -> Maybe [ALPN] -> TransportClientConfig
 transportClientConfig NetworkConfig {socksProxy, socksMode, tcpConnectTimeout, tcpKeepAlive, logTLSErrors} nm host useSNI clientALPN =
-  TransportClientConfig {socksProxy = socks, tcpConnectTimeout = tOut, tcpKeepAlive = keepAlive, logTLSErrors, clientCredentials = Nothing, clientALPN, useSNI}
+  TransportClientConfig {socksProxy = socks, tcpConnectTimeout = tOut, tcpKeepAlive, logTLSErrors, clientCredentials = Nothing, clientALPN, useSNI}
   where
     tOut = netTimeoutInt tcpConnectTimeout nm
     socks = useSocksProxy socksMode

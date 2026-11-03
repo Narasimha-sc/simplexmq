@@ -76,7 +76,7 @@ setSocketUnackedDataTimeout _ _ = pure ()
 #elif defined(darwin_HOST_OS)
 setSocketUnackedDataTimeout sock = setSocketOption sock (SockOpt _SOL_TCP _TCP_RXT_CONNDROPTIME)
 #else
-setSocketUnackedDataTimeout sock seconds = setSocketOption sock (SockOpt _SOL_TCP _TCP_USER_TIMEOUT) (seconds * 1000)
+setSocketUnackedDataTimeout _ _ = pure ()
 #endif
 
 setSocketKeepAlive :: Socket -> KeepAliveOpts -> IO ()

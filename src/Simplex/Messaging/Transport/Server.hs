@@ -52,7 +52,7 @@ import Simplex.Messaging.Transport
 import Simplex.Messaging.Transport.Shared
 import Simplex.Messaging.Util (catchAll_, labelMyThread, tshow, unlessM)
 import System.Exit (exitFailure)
-import System.IO.Error (tryIOError)
+import System.IO.Error (catchIOError, tryIOError)
 import System.Mem.Weak (Weak, deRefWeak)
 import UnliftIO (timeout)
 import UnliftIO.Concurrent
@@ -238,17 +238,21 @@ startTCPServer started host port = withSocketsDo $ resolve >>= open >>= setStart
     resolve =
       let hints = defaultHints {addrFlags = [AI_PASSIVE], addrSocketType = Stream}
        in select <$> getAddrInfo (Just hints) host (Just port)
-    select as = fromJust $ family AF_INET6 <|> family AF_INET
+    select as = (family AF_INET6, family AF_INET)
       where
         family f = find ((== f) . addrFamily) as
-    open addr = do
-      sock <- socket (addrFamily addr) (addrSocketType addr) (addrProtocol addr)
+    open addrs = do
+      (addr, sock) <- case addrs of
+        (Just addr6, Just addr4) -> newSocket addr6 `catchIOError` \e -> if unsupported e then newSocket addr4 else ioError e
+        (addr6_, addr4_) -> newSocket $ fromJust $ addr6_ <|> addr4_
       setSocketOption sock ReuseAddr 1
       withFdSocket sock setCloseOnExecIfNeeded
       logNote $ "binding to " <> tshow (addrAddress addr)
       bind sock $ addrAddress addr
       listen sock 1024
       pure sock
+    unsupported e = maybe False ((== eAFNOSUPPORT) . Errno) (ioe_errno e)
+    newSocket addr = (addr,) <$> socket (addrFamily addr) (addrSocketType addr) (addrProtocol addr)
     setStarted sock = atomically (tryPutTMVar started True) >> pure sock
 
 loadServerCredential :: ServerCredentials -> IO T.Credential

@@ -15,6 +15,7 @@ import CoreTests.RetryIntervalTests
 import CoreTests.SOCKSSettings
 import CoreTests.StoreLogTests
 import CoreTests.TSessionSubs
+import CoreTests.TransportServerTests
 import CoreTests.UtilTests
 import CoreTests.VersionRangeTests
 import FileDescriptionTests (fileDescriptionTests)
@@ -95,6 +96,7 @@ main = do
             describe "XFTP store log tests" fileStoreLogTests
             fileExpirationTests
             describe "TSessionSubs tests" tSessionSubsTests
+            describe "Transport server tests" transportServerTests
             describe "Util tests" utilTests
             describe "Names resolver tests" smpNamesTests
             describe "RSLV functional API tests" rslvTests

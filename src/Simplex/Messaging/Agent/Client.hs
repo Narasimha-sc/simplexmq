@@ -692,9 +692,16 @@ getSMPProxyClient c@AgentClient {active, smpClients, smpProxiedRelays, workerSeq
   unlessM (readTVarIO active) $ throwE INACTIVE
   proxySrv <- maybe (getNextServer c userId proxySrvs [destSrv]) pure proxySrv_
   ts <- liftIO getCurrentTime
-  (tSess, auth) <- liftIO $ proxiedTransportSession proxySrv
+  (tSess@(_, srv, _), auth) <- liftIO $ proxiedTransportSession proxySrv
   withGetSessVar workerSeq tSess smpClients ts (newProxyClient tSess auth ts) (waitForProxyClient tSess auth)
+    `catchAllErrors` \e -> do
+      unless (isWaitTimeout e) $ atomically $
+        TM.lookup destSess smpProxiedRelays >>= \case
+          Just (ProtoServerWithAuth chosenSrv _) | chosenSrv == srv -> TM.delete destSess smpProxiedRelays
+          _ -> pure ()
+      throwE e
   where
+    isWaitTimeout = \case BROKER _ TIMEOUT -> True; _ -> False
     proxiedTransportSession :: SMPServerWithAuth -> IO (SMPTransportSession, Maybe SMP.BasicAuth)
     proxiedTransportSession proxySrv = do
       ProtoServerWithAuth srv auth <- either id id <$> TM.lookupOrInsertIO destSess (pure proxySrv) smpProxiedRelays

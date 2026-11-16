@@ -363,6 +363,14 @@ proxyCfgShortTimeout =
         nt = NetworkTimeout {backgroundTimeout = 4_000000, interactiveTimeout = 4_000000}
      in cfg' {smpAgentCfg = aCfg {smpCfg = cCfg {networkConfig = (networkConfig cCfg) {tcpConnectTimeout = nt}}}}
 
+proxyCfgForwardTimeout :: HasTestEnv => AServerConfig
+proxyCfgForwardTimeout =
+  updateCfg (memoryCfg proxyCfg (testPath "smp-server-store.log.3") (testPath "smp-server-messages.log.3")) $ \cfg' ->
+    let aCfg = smpAgentCfg cfg'
+        cCfg = smpCfg aCfg
+        nt = NetworkTimeout {backgroundTimeout = 1, interactiveTimeout = 1}
+     in cfg' {smpAgentCfg = aCfg {smpCfg = cCfg {networkConfig = (networkConfig cCfg) {tcpTimeout = nt}}}}
+
 proxyCfgVPrev :: HasTestEnv => AStoreType -> AServerConfig
 proxyCfgVPrev msType =
   updateCfg (proxyCfgMS msType) $ \cfg' ->
